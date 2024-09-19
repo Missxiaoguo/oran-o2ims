@@ -426,6 +426,16 @@ func (t *clusterRequestReconcilerTask) getMergedClusterInputData(
 		return nil, fmt.Errorf("failed to get template defaults from ConfigMap %s: %w", templateDefaultsCm, err)
 	}
 
+	if dataType == utils.ClusterInstanceDataType {
+		// Special handling for overrides of ClusterInstance's extraLabels and extraAnnotations.
+		// The clusterTemplateInputMap will be overridden with the values from defaut configmap
+		// if same labels/annotations exist in both.
+		if err := utils.OverrideClusterInstanceLabelsOrAnnotations(
+			clusterTemplateInputMap, clusterTemplateDefaultsMap); err != nil {
+			return nil, utils.NewInputError(err.Error())
+		}
+	}
+
 	// Get the merged cluster data
 	mergedClusterDataMap, err := mergeClusterTemplateInputWithDefaults(clusterTemplateInputMap, clusterTemplateDefaultsMap)
 	if err != nil {
@@ -433,7 +443,7 @@ func (t *clusterRequestReconcilerTask) getMergedClusterInputData(
 	}
 
 	t.logger.Info(
-		fmt.Sprintf("Merged the %s default data with the clusterTemplateInput data for ClusterRequest", dataType),
+		fmt.Sprintf("Merged the %s default data with the clusterTemplateInput data for ClusterRequest: %+v", dataType, mergedClusterDataMap),
 		slog.String("name", t.object.Name),
 	)
 	return mergedClusterDataMap, nil
