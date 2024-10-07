@@ -229,8 +229,10 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 		return requeueWithError(err)
 	}
 
+	t.logger.Info(fmt.Sprintf("ANGIE------------------(prepare done) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 	// wait for the NodePool to be provisioned and update BMC details in ClusterInstance
 	provisioned, timedOutOrFailed, err := t.waitForHardwareData(ctx, renderedClusterInstance, renderedNodePool)
+	t.logger.Info(fmt.Sprintf("ANGIE------------------(hw prov) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 	if err != nil {
 		return requeueWithError(err)
 	}
@@ -252,7 +254,9 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 			return requeueWithMediumInterval(), nil
 		}
 	}
+	t.logger.Info(fmt.Sprintf("ANGIE------------------(hw after prov) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 
+	t.logger.Info(fmt.Sprintf("ANGIE------------------(cluster before prov) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 	hwProvisionedCond := meta.FindStatusCondition(
 		t.object.Status.Conditions,
 		string(utils.PRconditionTypes.HardwareProvisioned))
@@ -267,18 +271,20 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 			return requeueWithError(err)
 		}
 	}
+	t.logger.Info(fmt.Sprintf("ANGIE------------------(cluster after prov) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 
 	// Handle policy configuration only after the cluster provisioning
 	// has started, and not failed or timedout (completed, in-progress or unknown)
 	if utils.IsClusterProvisionPresent(t.object) &&
 		!utils.IsClusterProvisionTimedOutOrFailed(t.object) {
 
+		t.logger.Info(fmt.Sprintf("ANGIE------------------(config before) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 		// Handle configuration through policies.
 		requeue, err := t.handleClusterPolicyConfiguration(ctx)
 		if err != nil {
 			return requeueWithError(err)
 		}
-
+		t.logger.Info(fmt.Sprintf("ANGIE------------------(config after) provState %s", t.object.Status.ProvisioningStatus.ProvisioningState))
 		// Requeue if cluster provisioning is not completed (in-progress or unknown)
 		// or there are enforce policies that are not Compliant
 		if !utils.IsClusterProvisionCompleted(t.object) || requeue {
@@ -347,6 +353,12 @@ func (t *provisioningRequestReconcilerTask) checkClusterDeployConfigState(ctx co
 }
 
 func (t *provisioningRequestReconcilerTask) handleValidation(ctx context.Context) error {
+	// Initilize provisioning state with pending
+	if t.object.Status.ProvisioningStatus.ProvisioningState == "" ||
+		t.object.Status.ProvisioningStatus.ProvisioningState == provisioningv1alpha1.StateFulfilled {
+		utils.SetProvisioningState(t.object, provisioningv1alpha1.StatePending)
+	}
+
 	// Validate provisioning request CR
 	err := t.validateProvisioningRequestCR(ctx)
 	if err != nil {
@@ -1066,6 +1078,10 @@ func (t *provisioningRequestReconcilerTask) checkClusterProvisionStatus(
 	t.updateClusterInstanceProcessedStatus(clusterInstance)
 	t.updateClusterProvisionStatus(clusterInstance)
 
+	if err := t.updateOCloudNodeClusterId(ctx); err != nil {
+		return fmt.Errorf("failed to update oCloudNodeClusterId in status: %w", err)
+	}
+
 	if updateErr := utils.UpdateK8sCRStatus(ctx, t.client, t.object); updateErr != nil {
 		return fmt.Errorf("failed to update status for ProvisioningRequest %s: %w", t.object.Name, updateErr)
 	}
@@ -1152,7 +1168,7 @@ func (t *provisioningRequestReconcilerTask) handleClusterPolicyConfiguration(ctx
 	if err != nil {
 		return false, err
 	}
-	err = t.updateZTPStatus(ctx, allPoliciesCompliant)
+	err = t.updateZTPAndProvisioningStatus(ctx, allPoliciesCompliant)
 	if err != nil {
 		return false, err
 	}
@@ -1162,20 +1178,20 @@ func (t *provisioningRequestReconcilerTask) handleClusterPolicyConfiguration(ctx
 	return nonCompliantPolicyInEnforce, nil
 }
 
-// updateZTPStatus updates status.ClusterDetails.ZtpStatus.
-func (t *provisioningRequestReconcilerTask) updateZTPStatus(ctx context.Context, allPoliciesCompliant bool) error {
-	// Check if the cluster provision has started.
-	crProvisionedCond := meta.FindStatusCondition(t.object.Status.Conditions, string(utils.PRconditionTypes.ClusterProvisioned))
-	if crProvisionedCond != nil {
-		// If the provisioning has started, and the ZTP status is empty or not done.
+// updateZTPAndProvisioningStatus updates status.ClusterDetails.ZtpStatus and status.provisioningStatus.provisioningState
+func (t *provisioningRequestReconcilerTask) updateZTPAndProvisioningStatus(ctx context.Context, allPoliciesCompliant bool) error {
+	// If the provisioning has started, and the ZTP status is empty or not done.
+	if utils.IsClusterProvisionPresent(t.object) {
 		if t.object.Status.ClusterDetails.ZtpStatus != utils.ClusterZtpDone {
 			t.object.Status.ClusterDetails.ZtpStatus = utils.ClusterZtpNotDone
-			// If the provisioning finished and all the policies are compliant, then ZTP is done.
-			if crProvisionedCond.Status == metav1.ConditionTrue && allPoliciesCompliant {
-				// Once the ZTPStatus reaches ZTP Done, it will stay that way.
-				t.object.Status.ClusterDetails.ZtpStatus = utils.ClusterZtpDone
-			}
 		}
+	}
+
+	// If the provisioning finished and all the policies are compliant,
+	// then ZTP is done and provisioning state is fulfilled
+	if utils.IsClusterProvisionCompleted(t.object) && allPoliciesCompliant {
+		t.object.Status.ClusterDetails.ZtpStatus = utils.ClusterZtpDone
+		utils.SetProvisioningState(t.object, provisioningv1alpha1.StateFulfilled)
 	}
 
 	if err := utils.UpdateK8sCRStatus(ctx, t.client, t.object); err != nil {
@@ -1314,9 +1330,11 @@ func (t *provisioningRequestReconcilerTask) updateConfigurationAppliedStatus(
 
 		message := "The configuration is still being applied"
 		reason := utils.CRconditionReasons.InProgress
+		utils.SetProvisioningState(t.object, provisioningv1alpha1.StateProgressing)
 		if policyTimedOut {
 			message += ", but it timed out"
 			reason = utils.CRconditionReasons.TimedOut
+			utils.SetProvisioningState(t.object, provisioningv1alpha1.StateTimeout)
 		}
 		utils.SetStatusCondition(&t.object.Status.Conditions,
 			utils.PRconditionTypes.ConfigurationApplied,
@@ -1417,8 +1435,10 @@ func (t *provisioningRequestReconcilerTask) updateClusterProvisionStatus(ci *sit
 			t.object.Status.ClusterDetails.ClusterProvisionStartedAt = metav1.Now()
 		}
 
-		// If it's not failed or completed, check if it has timed out
-		if !utils.IsClusterProvisionCompletedOrFailed(t.object) {
+		if utils.IsClusterProvisionFailed(t.object) {
+			utils.SetProvisioningState(t.object, provisioningv1alpha1.StateFailed)
+		} else if !utils.IsClusterProvisionCompleted(t.object) {
+			// If it's not failed or completed, check if it has timed out
 			if utils.TimeoutExceeded(
 				t.object.Status.ClusterDetails.ClusterProvisionStartedAt.Time,
 				t.timeouts.clusterProvisioning) {
@@ -1429,9 +1449,35 @@ func (t *provisioningRequestReconcilerTask) updateClusterProvisionStatus(ci *sit
 					metav1.ConditionFalse,
 					"Cluster provisioning timed out",
 				)
+				utils.SetProvisioningState(t.object, provisioningv1alpha1.StateTimeout)
+			} else {
+				// In-progress or unknown
+				utils.SetProvisioningState(t.object, provisioningv1alpha1.StateProgressing)
 			}
 		}
 	}
+}
+
+func (t *provisioningRequestReconcilerTask) updateOCloudNodeClusterId(ctx context.Context) error {
+	// Ensure the clusterID is stored in the provisionedResources once it's available
+	managedCluster := &clusterv1.ManagedCluster{}
+	managedClusterExists, err := utils.DoesK8SResourceExist(
+		ctx, t.client, t.object.Status.ClusterDetails.Name, "", managedCluster)
+	if err != nil {
+		return fmt.Errorf("failed to check if managed cluster exists: %w", err)
+	}
+
+	if managedClusterExists {
+		// If the clusterID label exists, set it in the provisionedResources.
+		clusterID, exists := managedCluster.GetLabels()["clusterID"]
+		if exists {
+			if t.object.Status.ProvisioningStatus.ProvisionedResources == nil {
+				t.object.Status.ProvisioningStatus.ProvisionedResources = &provisioningv1alpha1.ProvisionedResources{}
+			}
+			t.object.Status.ProvisioningStatus.ProvisionedResources.OCloudNodeClusterId = clusterID
+		}
+	}
+	return nil
 }
 
 // createOrUpdateClusterResources creates/updates all the resources needed for cluster deployment
@@ -2206,6 +2252,7 @@ func (t *provisioningRequestReconcilerTask) updateHardwareProvisioningStatus(
 			// Ensure a consistent message for the provisioning request, regardless of which plugin is used.
 			message = "Hardware provisioning failed"
 			timedOutOrFailed = true
+			utils.SetProvisioningState(t.object, provisioningv1alpha1.StateFailed)
 		}
 	} else {
 		// No provisioning condition found, set the status to unknown.
@@ -2231,7 +2278,12 @@ func (t *provisioningRequestReconcilerTask) updateHardwareProvisioningStatus(
 			message = "Hardware provisioning timed out"
 			status = metav1.ConditionFalse
 			timedOutOrFailed = true
+			utils.SetProvisioningState(t.object, provisioningv1alpha1.StateTimeout)
 		}
+	}
+
+	if status != metav1.ConditionTrue && !timedOutOrFailed {
+		utils.SetProvisioningState(t.object, provisioningv1alpha1.StateProgressing)
 	}
 
 	// Set the status condition for hardware provisioning.

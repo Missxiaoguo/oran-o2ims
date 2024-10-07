@@ -93,12 +93,51 @@ type PolicyDetails struct {
 	RemediationAction string `json:"remediationAction,omitempty"`
 }
 
+// ProvisioningState defines the various states of the provisioning process.
+type ProvisioningState string
+
+const (
+	// StatePending means provisioning process is pending to start.
+	// This includes waiting for resources preparation to be completed.
+	StatePending ProvisioningState = "pending"
+
+	// StateProgressing means the provisioning process is currently in progress.
+	// It could be in progress during hardware provisioning, cluster provisioning, or cluster configuration.
+	StateProgressing ProvisioningState = "progressing"
+
+	// StateFulfilled means the provisioning process has been successfully completed for all stages.
+	StateFulfilled ProvisioningState = "fulfilled"
+
+	// StateFailed means the provisioning process has failed in one of the stages.
+	StateFailed ProvisioningState = "failed"
+
+	// StateTimeout means the provisioning process has exceeded the allowed time in one of the stages.
+	StateTimeout ProvisioningState = "timeout"
+)
+
+// ProvisionedResources contains the resources that were provisioned as part of the provisioning process.
+type ProvisionedResources struct {
+	// The identifier of the provisioned oCloud node cluster.
+	OCloudNodeClusterId string `json:"oCloudNodeClusterId,omitempty"`
+}
+
+type ProvisioningStatus struct {
+	// The current state of the provisioning process.
+	// +kubebuilder:validation:Enum=pending;progressing;fulfilled;failed;timeout
+	ProvisioningState ProvisioningState `json:"provisioningState,omitempty"`
+
+	// The resources that have been successfully provisioned as part of the provisioning process.
+	ProvisionedResources *ProvisionedResources `json:"provisionedResources,omitempty"`
+}
+
 // ProvisioningRequestStatus defines the observed state of ProvisioningRequest
 type ProvisioningRequestStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	ProvisioningStatus ProvisioningStatus `json:"provisioningStatus,omitempty"`
 
 	// ClusterDetails references to the ClusterInstance.
 	ClusterDetails *ClusterDetails `json:"clusterDetails,omitempty"`
@@ -113,6 +152,8 @@ type ProvisioningRequestStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:scope=Cluster
+//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+//+kubebuilder:printcolumn:name="ProvisionState",type="string",JSONPath=".status.provisioningStatus.provisioningState"
 
 // ProvisioningRequest is the Schema for the provisioningrequests API
 // +operator-sdk:csv:customresourcedefinitions:displayName="ORAN O2IMS Provisioning Request",resources={{Namespace, v1},{ClusterInstance, siteconfig.open-cluster-management.io/v1alpha1}}
