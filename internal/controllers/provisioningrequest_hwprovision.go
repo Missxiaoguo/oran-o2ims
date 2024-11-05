@@ -16,17 +16,17 @@ import (
 	siteconfig "github.com/stolostron/siteconfig/api/v1alpha1"
 )
 
-func (t *provisioningRequestReconcilerTask) createOrUpdateNodePool(ctx context.Context, nodePool *hwv1alpha1.NodePool) error {
+func (t *provisioningRequestReconcilerTask) initiateHardwareProvisioning(ctx context.Context, nodePool *hwv1alpha1.NodePool) (bool, error) {
 
 	existingNodePool := &hwv1alpha1.NodePool{}
 
 	exist, err := utils.DoesK8SResourceExist(ctx, t.client, nodePool.Name, nodePool.Namespace, existingNodePool)
 	if err != nil {
-		return fmt.Errorf("failed to get NodePool %s in namespace %s: %w", nodePool.GetName(), nodePool.GetNamespace(), err)
+		return false, fmt.Errorf("failed to get NodePool %s in namespace %s: %w", nodePool.GetName(), nodePool.GetNamespace(), err)
 	}
 
 	if !exist {
-		return t.createNodePoolResources(ctx, nodePool)
+		return false, t.createNodePoolResources(ctx, nodePool)
 	}
 
 	// The template validate is already completed; compare NodeGroup and update them if necessary
@@ -37,7 +37,7 @@ func (t *provisioningRequestReconcilerTask) createOrUpdateNodePool(ctx context.C
 		existingNodePool.Spec = nodePool.Spec
 		// Apply the patch to update the NodePool with the new spec
 		if err = t.client.Patch(ctx, existingNodePool, patch); err != nil {
-			return fmt.Errorf("failed to patch NodePool %s in namespace %s: %w", nodePool.GetName(), nodePool.GetNamespace(), err)
+			return false, fmt.Errorf("failed to patch NodePool %s in namespace %s: %w", nodePool.GetName(), nodePool.GetNamespace(), err)
 		}
 
 		// After successful patch, update the status
@@ -45,7 +45,7 @@ func (t *provisioningRequestReconcilerTask) createOrUpdateNodePool(ctx context.C
 		err := utils.UpdateNodePoolStatus(ctx, t.client, existingNodePool, hwv1alpha1.Configured, metav1.ConditionFalse,
 			hwv1alpha1.ConfigUpdate, hwv1alpha1.AwaitConfig)
 		if err != nil {
-			return fmt.Errorf("failed to update status of NodePool %s in namespace %s: %w", nodePool.GetName(), nodePool.GetNamespace(), err)
+			return false, fmt.Errorf("failed to update status of NodePool %s in namespace %s: %w", nodePool.GetName(), nodePool.GetNamespace(), err)
 		}
 		t.logger.InfoContext(
 			ctx,
@@ -56,7 +56,7 @@ func (t *provisioningRequestReconcilerTask) createOrUpdateNodePool(ctx context.C
 			),
 		)
 	}
-	return nil
+	return true, nil
 }
 
 func (t *provisioningRequestReconcilerTask) createNodePoolResources(ctx context.Context, nodePool *hwv1alpha1.NodePool) error {
@@ -110,22 +110,6 @@ func (t *provisioningRequestReconcilerTask) createNodePoolResources(ctx context.
 		return fmt.Errorf("failed to set CloudManager's ObservedGeneration: %w", err)
 	}
 	return nil
-}
-
-// waitForHardwareData waits for the NodePool to be provisioned and update BMC details
-// and bootMacAddress in ClusterInstance.
-func (t *provisioningRequestReconcilerTask) waitForHardwareData(ctx context.Context,
-	clusterInstance *siteconfig.ClusterInstance, nodePool *hwv1alpha1.NodePool) (bool, *bool, bool, error) {
-
-	var configured *bool
-	provisioned, timedOutOrFailed, err := t.checkNodePoolProvisionStatus(ctx, clusterInstance, nodePool)
-	if err != nil {
-		return provisioned, nil, timedOutOrFailed, err
-	}
-	if provisioned {
-		configured, timedOutOrFailed, err = t.checkNodePoolConfigStatus(ctx, nodePool)
-	}
-	return provisioned, configured, timedOutOrFailed, err
 }
 
 // updateClusterInstance updates the given ClusterInstance object based on the provisioned nodePool.
@@ -199,8 +183,8 @@ func (t *provisioningRequestReconcilerTask) checkNodePoolStatus(ctx context.Cont
 }
 
 // checkNodePoolProvisionStatus checks the provisioned status of the node pool.
-func (t *provisioningRequestReconcilerTask) checkNodePoolProvisionStatus(ctx context.Context,
-	clusterInstance *siteconfig.ClusterInstance, nodePool *hwv1alpha1.NodePool) (bool, bool, error) {
+func (t *provisioningRequestReconcilerTask) checkNodePoolProvisionStatus(
+	ctx context.Context, nodePool *hwv1alpha1.NodePool) (bool, bool, error) {
 
 	provisioned, timedOutOrFailed, err := t.checkNodePoolStatus(ctx, nodePool, hwv1alpha1.Provisioned)
 	if provisioned && err == nil {
@@ -212,16 +196,14 @@ func (t *provisioningRequestReconcilerTask) checkNodePoolProvisionStatus(ctx con
 				nodePool.GetNamespace(),
 			),
 		)
-		if err = t.updateClusterInstance(ctx, clusterInstance, nodePool); err != nil {
-			return provisioned, timedOutOrFailed, fmt.Errorf("failed to update the rendered cluster instance: %w", err)
-		}
 	}
 
 	return provisioned, timedOutOrFailed, err
 }
 
 // checkNodePoolConfigStatus checks the configured status of the node pool.
-func (t *provisioningRequestReconcilerTask) checkNodePoolConfigStatus(ctx context.Context, nodePool *hwv1alpha1.NodePool) (*bool, bool, error) {
+func (t *provisioningRequestReconcilerTask) checkNodePoolConfigStatus(
+	ctx context.Context, nodePool *hwv1alpha1.NodePool) (*bool, bool, error) {
 
 	status, timedOutOrFailed, err := t.checkNodePoolStatus(ctx, nodePool, hwv1alpha1.Configured)
 	if err != nil {
@@ -333,6 +315,7 @@ func (t *provisioningRequestReconcilerTask) updateHardwareStatus(
 		status = metav1.ConditionUnknown
 		reason = string(utils.CRconditionReasons.Unknown)
 		message = "Unknown state of hardware provisioning"
+		utils.SetProvisioningStateInProgress(t.object, message)
 	}
 
 	if status != metav1.ConditionTrue && reason != string(hwv1alpha1.Failed) {

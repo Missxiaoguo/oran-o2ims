@@ -54,15 +54,15 @@ func (t *provisioningRequestReconcilerTask) IsUpgradeRequested(
 	return false, nil
 }
 
-func (t *provisioningRequestReconcilerTask) handleUpgrade(
-	ctx context.Context, renderedClusterInstance *siteconfig.ClusterInstance) (ctrl.Result, error) {
+func (t *provisioningRequestReconcilerTask) initiateUpgrade(
+	ctx context.Context, renderedClusterInstance *siteconfig.ClusterInstance) error {
 	t.logger.InfoContext(
 		ctx,
-		"Start handleUpgrade",
+		"Upgrade requested. Initiating upgrade.",
 	)
 	clusterTemplate, err := t.getCrClusterTemplateRef(ctx)
 	if err != nil {
-		return requeueWithError(fmt.Errorf("failed to get clusterTemplate: %w", err))
+		return fmt.Errorf("failed to get clusterTemplate: %w", err)
 	}
 
 	ibgu := &ibgu.ImageBasedGroupUpgrade{}
@@ -73,10 +73,10 @@ func (t *provisioningRequestReconcilerTask) handleUpgrade(
 			clusterTemplate.Namespace, utils.UpgradeDefaultsConfigmapKey,
 			renderedClusterInstance.Spec.ClusterName, t.object.Name, renderedClusterInstance.Namespace)
 		if err != nil {
-			return requeueWithError(fmt.Errorf("failed to generate IBGU for cluster: %w", err))
+			return fmt.Errorf("failed to generate IBGU for cluster: %w", err)
 		}
 		if err := utils.CreateK8sCR(ctx, t.client, ibgu, t.object, utils.UPDATE); err != nil {
-			return requeueWithError(fmt.Errorf("failed to create IBGU: %w", err))
+			return fmt.Errorf("failed to create IBGU: %w", err)
 		}
 
 		t.logger.InfoContext(
@@ -96,13 +96,27 @@ func (t *provisioningRequestReconcilerTask) handleUpgrade(
 		)
 		utils.SetProvisioningStateInProgress(t.object, "Cluster upgrade is initiated")
 		if err := utils.UpdateK8sCRStatus(ctx, t.client, t.object); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ClusterRequest CR status: %w", err))
+			return fmt.Errorf("failed to update ClusterRequest CR status: %w", err)
 		}
 
 	} else if err != nil {
-		return requeueWithError(fmt.Errorf("error getting IBGU: %w", err))
+		return fmt.Errorf("error getting IBGU: %w", err)
 	}
 
+	return nil
+}
+
+func (t *provisioningRequestReconcilerTask) checkUpgradeStatus(ctx context.Context, clusterName string) (ctrl.Result, error) {
+	clusterTemplate, err := t.getCrClusterTemplateRef(ctx)
+	if err != nil {
+		return requeueWithError(fmt.Errorf("failed to get clusterTemplate: %w", err))
+	}
+
+	ibgu := &ibgu.ImageBasedGroupUpgrade{}
+	err = t.client.Get(ctx, types.NamespacedName{Name: t.object.Name, Namespace: clusterName}, ibgu)
+	if err != nil {
+		return requeueWithError(err)
+	}
 	if isIBGUProgressing(ibgu) {
 		utils.SetProvisioningStateInProgress(t.object, "Cluster upgrade is in progress")
 		utils.SetStatusCondition(&t.object.Status.Conditions,
@@ -164,7 +178,6 @@ func (t *provisioningRequestReconcilerTask) handleUpgrade(
 			}
 		}
 	}
-
 	return doNotRequeue(), nil
 }
 

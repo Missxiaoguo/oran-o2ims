@@ -123,6 +123,18 @@ func IsProvisioningStateFulfilled(cr *provisioningv1alpha1.ProvisioningRequest) 
 	return cr.Status.ProvisioningStatus.ProvisioningState == provisioningv1alpha1.StateFulfilled
 }
 
+// IsHardwareProvisionCompleted checks if the cluster provision condition is present
+func IsHardwareProvisionCompleted(cr *provisioningv1alpha1.ProvisioningRequest) bool {
+	condition := meta.FindStatusCondition(cr.Status.Conditions, (string(PRconditionTypes.HardwareProvisioned)))
+	return condition != nil && condition.Status == metav1.ConditionTrue
+}
+
+// IsHardwareConfigureCompleted checks if the cluster provision condition is present
+func IsHardwareConfigureCompleted(cr *provisioningv1alpha1.ProvisioningRequest) bool {
+	condition := meta.FindStatusCondition(cr.Status.Conditions, (string(PRconditionTypes.HardwareConfigured)))
+	return condition != nil && condition.Status == metav1.ConditionTrue
+}
+
 // IsClusterProvisionPresent checks if the cluster provision condition is present
 func IsClusterProvisionPresent(cr *provisioningv1alpha1.ProvisioningRequest) bool {
 	condition := meta.FindStatusCondition(cr.Status.Conditions, (string(PRconditionTypes.ClusterProvisioned)))

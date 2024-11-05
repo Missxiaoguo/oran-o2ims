@@ -159,7 +159,7 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 	err := t.handleValidation(ctx)
 	if err != nil {
 		if utils.IsInputError(err) {
-			return t.checkClusterDeployConfigState(ctx)
+			return t.updateClusterDeployConfigState(ctx)
 		}
 		// internal error that might recover
 		return requeueWithError(err)
@@ -169,7 +169,7 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 	renderedClusterInstance, err := t.handleRenderClusterInstance(ctx)
 	if err != nil {
 		if utils.IsInputError(err) {
-			return t.checkClusterDeployConfigState(ctx)
+			return t.updateClusterDeployConfigState(ctx)
 		}
 		return requeueWithError(err)
 	}
@@ -178,7 +178,7 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 	err = t.handleClusterResources(ctx, renderedClusterInstance)
 	if err != nil {
 		if utils.IsInputError(err) {
-			_, err = t.checkClusterDeployConfigState(ctx)
+			_, err = t.updateClusterDeployConfigState(ctx)
 			if err != nil {
 				return requeueWithError(err)
 			}
@@ -189,85 +189,58 @@ func (t *provisioningRequestReconcilerTask) run(ctx context.Context) (ctrl.Resul
 		return requeueWithError(err)
 	}
 
-	// Handle hardware template and NodePool provisioning/configuring
-	res, proceed, err := t.handleNodePoolProvisioning(ctx, renderedClusterInstance)
-	if err != nil || (res == doNotRequeue() && !proceed) || res.RequeueAfter > 0 {
-		return res, err
-	}
-
-	// Handle the cluster install with ClusterInstance
-	err = t.handleClusterInstallation(ctx, renderedClusterInstance)
-	if err != nil {
-		return requeueWithError(err)
-	}
-
-	// Handle policy configuration only after the cluster provisioning
-	// has started, and not failed or timedout (completed, in-progress or unknown)
-	if utils.IsClusterProvisionPresent(t.object) &&
-		!utils.IsClusterProvisionTimedOutOrFailed(t.object) {
-
-		// Handle configuration through policies.
-		requeue, err := t.handleClusterPolicyConfiguration(ctx)
-		if err != nil {
-			return requeueWithError(err)
-		}
-
-		// Requeue if cluster provisioning is not completed (in-progress or unknown)
-		// or there are enforce policies that are not Compliant.
-		if !utils.IsClusterProvisionCompleted(t.object) || requeue {
-			return requeueWithLongInterval(), nil
-		}
-
-		shouldUpgrade, err := t.IsUpgradeRequested(ctx, renderedClusterInstance.GetName())
-		if err != nil {
-			return requeueWithError(err)
-		}
-
-		if utils.IsClusterUpgradeInitiated(t.object) && !utils.IsClusterUpgradeCompleted(t.object) ||
-			utils.IsClusterProvisionCompleted(t.object) && shouldUpgrade {
-			t.logger.InfoContext(
-				ctx,
-				"Upgrade requested. Start handling upgrade.",
-			)
-			requeue, err := t.handleUpgrade(ctx, renderedClusterInstance)
-			if err != nil {
-				return requeueWithError(err)
-			}
-			return requeue, nil
-		}
-
-	}
-
-	return doNotRequeue(), nil
-}
-
-// handleNodePoolProvisioning handles the rendering, creation, and provisioning of the NodePool.
-// It first renders the hardware template for the NodePool based on the provided ClusterInstance,
-// then creates or updates the NodePool resource, and finally waits for the NodePool to be provisioned.
-// The function returns a ctrl.Result to indicate if/when to requeue, the rendered NodePool, a bool
-// to indicate whether to process with further processing and an error if any issues occur.
-func (t *provisioningRequestReconcilerTask) handleNodePoolProvisioning(ctx context.Context,
-	renderedClusterInstance *siteconfig.ClusterInstance) (ctrl.Result, bool, error) {
-
 	// Render the hardware template for NodePool
 	renderedNodePool, err := t.renderHardwareTemplate(ctx, renderedClusterInstance)
 	if err != nil {
 		if utils.IsInputError(err) {
-			res, err := t.checkClusterDeployConfigState(ctx)
-			return res, false, err
+			return t.updateClusterDeployConfigState(ctx)
 		}
-		res, requeueErr := requeueWithError(err)
-		return res, false, requeueErr
+		return requeueWithError(err)
 	}
 
-	// Create/Update the NodePool
-	if err := t.createOrUpdateNodePool(ctx, renderedNodePool); err != nil {
-		res, requeueErr := requeueWithError(err)
-		return res, false, requeueErr
+	// Apply NodePool
+	hwConfigUpdateRequested, err := t.initiateHardwareProvisioning(ctx, renderedNodePool)
+	if err != nil {
+		return requeueWithError(err)
 	}
 
-	// Wait for the NodePool to be provisioned and update BMC details if necessary
-	provisioned, configured, timedOutOrFailed, err := t.waitForHardwareData(ctx, renderedClusterInstance, renderedNodePool)
+	if (!hwConfigUpdateRequested && utils.IsHardwareProvisionCompleted(t.object)) ||
+		(hwConfigUpdateRequested && utils.IsHardwareConfigureCompleted(t.object)) {
+
+		// NodePool has provisioned/configured, update the rendered ClusterInstance with returned data
+		if err = t.updateClusterInstance(ctx, renderedClusterInstance, renderedNodePool); err != nil {
+			return requeueWithError(err)
+		}
+
+		// Apply ClusterInstance
+		if err = t.initiateClusterInstallation(ctx, renderedClusterInstance); err != nil {
+			return requeueWithError(err)
+		}
+
+		// Apply IBGU to trigger upgrade if it was requested
+		if utils.IsClusterProvisionCompleted(t.object) && !utils.IsClusterUpgradeInitiated(t.object) {
+			shouldUpgrade, err := t.IsUpgradeRequested(ctx, renderedClusterInstance.GetName())
+			if err != nil {
+				return requeueWithError(err)
+			}
+			if shouldUpgrade {
+				if err := t.initiateUpgrade(ctx, renderedClusterInstance); err != nil {
+					return requeueWithError(err)
+				}
+			}
+		}
+	}
+
+	return t.updateClusterDeployConfigState(ctx)
+}
+
+func (t *provisioningRequestReconcilerTask) waitForHardwareProvisionedOrConfigured(
+	ctx context.Context, nodePoolName, nodePoolNamespace string) (ctrl.Result, bool, error) {
+	nodePool := &hwv1alpha1.NodePool{}
+	nodePool.SetName(nodePoolName)
+	nodePool.SetNamespace(nodePoolNamespace)
+	provisioned, timedOutOrFailed, err := t.checkNodePoolProvisionStatus(ctx, nodePool)
+	t.logger.Info("ANGIE- wait for hardwere provisioning", "provisioned", provisioned)
 	if err != nil {
 		res, requeueErr := requeueWithError(err)
 		return res, false, requeueErr
@@ -280,8 +253,8 @@ func (t *provisioningRequestReconcilerTask) handleNodePoolProvisioning(ctx conte
 			ctx,
 			fmt.Sprintf(
 				"Waiting for NodePool %s in the namespace %s to be provisioned",
-				renderedNodePool.GetName(),
-				renderedNodePool.GetNamespace(),
+				nodePool.GetName(),
+				nodePool.GetNamespace(),
 			),
 		)
 		return requeueWithMediumInterval(), false, nil
@@ -289,61 +262,54 @@ func (t *provisioningRequestReconcilerTask) handleNodePoolProvisioning(ctx conte
 
 	// If configuration is not yet complete, wait for it to complete
 	// If configuration is not set, do nothing
+	configured, timedOutOrFailed, err := t.checkNodePoolConfigStatus(ctx, nodePool)
+	if err != nil {
+		res, requeueErr := requeueWithError(err)
+		return res, false, requeueErr
+	}
+	if timedOutOrFailed {
+		return doNotRequeue(), false, nil
+	}
 	if configured != nil && !*configured {
 		t.logger.InfoContext(
 			ctx,
 			fmt.Sprintf(
 				"Waiting for NodePool %s in the namespace %s to be configured",
-				renderedNodePool.GetName(),
-				renderedNodePool.GetNamespace(),
+				nodePool.GetName(),
+				nodePool.GetNamespace(),
 			),
 		)
 		return requeueWithMediumInterval(), false, nil
 	}
 
-	// Provisioning completed successfully; proceed with further processing
+	// Provisioning/Configuration completed successfully; proceed with further processing
 	return doNotRequeue(), true, nil
 }
 
-// checkClusterDeployConfigState checks the current deployment and configuration state of
+// updateClusterDeployConfigState checks the current deployment and configuration state of
 // the cluster by evaluating the statuses of related resources like NodePool, ClusterInstance
 // and policy configuration when applicable, and update the corresponding ProvisioningRequest
 // status conditions
-func (t *provisioningRequestReconcilerTask) checkClusterDeployConfigState(ctx context.Context) (result ctrl.Result, err error) {
-	// Check the NodePool status if exists
-	if t.object.Status.NodePoolRef == nil {
-		if err = t.checkResourcePreparationStatus(ctx); err != nil {
-			return requeueWithError(err)
+func (t *provisioningRequestReconcilerTask) updateClusterDeployConfigState(ctx context.Context) (result ctrl.Result, err error) {
+	t.logger.Info("ANGIE -- updateClusterDeployConfigState")
+	t.logger.Info("ANGIE -- nodePoolRef status", "nodePoolRef", t.object.Status.NodePoolRef)
+	hwProvisionedOrConfigured := false
+	if t.object.Status.NodePoolRef != nil {
+		result, hwProvisionedOrConfigured, err = t.waitForHardwareProvisionedOrConfigured(ctx,
+			t.object.Status.NodePoolRef.Name, t.object.Status.NodePoolRef.Namespace)
+		if err != nil || !result.IsZero() {
+			return result, err
 		}
-		return doNotRequeue(), nil
-	}
-	nodePool := &hwv1alpha1.NodePool{}
-	nodePool.SetName(t.object.Status.NodePoolRef.Name)
-	nodePool.SetNamespace(t.object.Status.NodePoolRef.Namespace)
-	hwProvisioned, timedOutOrFailed, err := t.checkNodePoolStatus(ctx, nodePool, hwv1alpha1.Provisioned)
-	if err != nil {
-		return requeueWithError(err)
-	}
-	if timedOutOrFailed {
-		if err = t.checkResourcePreparationStatus(ctx); err != nil {
-			return requeueWithError(err)
-		}
-		// Timeout occurred or failed, stop requeuing
-		return doNotRequeue(), nil
-	}
-	if !hwProvisioned {
-		return requeueWithMediumInterval(), nil
 	}
 
-	// Check the ClusterInstance status if exists
-	if t.object.Status.ClusterDetails != nil {
-		err = t.checkClusterProvisionStatus(
-			ctx, t.object.Status.ClusterDetails.Name)
+	if hwProvisionedOrConfigured && t.object.Status.ClusterDetails != nil {
+		clusterName := t.object.Status.ClusterDetails.Name
+		err = t.checkClusterInstallStatus(ctx, clusterName)
 		if err != nil {
 			return requeueWithError(err)
 		}
 
-		// Check the policy configuration status only after the cluster provisioning
+		// Handle policy configuration status only after the cluster installation
 		// has started, and not failed or timedout
 		if utils.IsClusterProvisionPresent(t.object) &&
 			!utils.IsClusterProvisionTimedOutOrFailed(t.object) {
@@ -355,6 +321,13 @@ func (t *provisioningRequestReconcilerTask) checkClusterDeployConfigState(ctx co
 			// or there are enforce policies that are not Compliant
 			if !utils.IsClusterProvisionCompleted(t.object) || requeue {
 				return requeueWithLongInterval(), nil
+			}
+		}
+
+		if utils.IsClusterUpgradeInitiated(t.object) && !utils.IsClusterUpgradeCompleted(t.object) {
+			result, err := t.checkUpgradeStatus(ctx, clusterName)
+			if err != nil || !result.IsZero() {
+				return result, err
 			}
 		}
 	}

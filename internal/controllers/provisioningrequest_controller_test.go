@@ -764,6 +764,17 @@ var _ = Describe("ProvisioningRequestReconcile", func() {
 			}
 			nodePool.Annotations = map[string]string{"bootInterfaceLabel": "label"}
 			Expect(c.Create(ctx, nodePool)).To(Succeed())
+
+			hwProvisionedCond := metav1.Condition{
+				Type:   string(utils.PRconditionTypes.ClusterProvisioned),
+				Status: metav1.ConditionFalse,
+			}
+			cr.Status.Conditions = append(cr.Status.Conditions, hwProvisionedCond)
+			cr.Status.NodePoolRef = &provisioningv1alpha1.NodePoolRef{}
+			cr.Status.NodePoolRef.Name = crName
+			cr.Status.NodePoolRef.Namespace = utils.UnitTestHwmgrNamespace
+			cr.Status.NodePoolRef.HardwareProvisioningCheckStart = metav1.Now()
+			Expect(c.Status().Update(ctx, cr)).To(Succeed())
 		})
 
 		It("Verify ClusterInstance should not be created when NodePool provision is in-progress", func() {

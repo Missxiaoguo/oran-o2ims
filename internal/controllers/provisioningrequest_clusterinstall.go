@@ -136,8 +136,8 @@ func (t *provisioningRequestReconcilerTask) renderClusterInstanceTemplate(
 	return renderedClusterInstance, nil
 }
 
-// handleClusterInstallation creates/updates the ClusterInstance to handle the cluster provisioning.
-func (t *provisioningRequestReconcilerTask) handleClusterInstallation(ctx context.Context, clusterInstance *siteconfig.ClusterInstance) error {
+// initiateClusterInstallation creates/updates the ClusterInstance to handle the cluster provisioning.
+func (t *provisioningRequestReconcilerTask) initiateClusterInstallation(ctx context.Context, clusterInstance *siteconfig.ClusterInstance) error {
 	isDryRun := false
 	err := t.applyClusterInstance(ctx, clusterInstance, isDryRun)
 	if err != nil {
@@ -149,17 +149,16 @@ func (t *provisioningRequestReconcilerTask) handleClusterInstallation(ctx contex
 			t.object.Status.ClusterDetails = &provisioningv1alpha1.ClusterDetails{}
 		}
 		t.object.Status.ClusterDetails.Name = clusterInstance.GetName()
+		if updateErr := utils.UpdateK8sCRStatus(ctx, t.client, t.object); updateErr != nil {
+			return fmt.Errorf("failed to update status for ProvisioningRequest %s: %w", t.object.Name, updateErr)
+		}
 	}
 
-	// Continue checking the existing ClusterInstance provision status
-	if err := t.checkClusterProvisionStatus(ctx, clusterInstance.Name); err != nil {
-		return err
-	}
 	return nil
 }
 
-// checkClusterProvisionStatus checks the status of cluster provisioning
-func (t *provisioningRequestReconcilerTask) checkClusterProvisionStatus(
+// checkClusterInstallStatus checks the status of cluster installation
+func (t *provisioningRequestReconcilerTask) checkClusterInstallStatus(
 	ctx context.Context, clusterInstanceName string) error {
 
 	clusterInstance := &siteconfig.ClusterInstance{}
