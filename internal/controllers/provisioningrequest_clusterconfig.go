@@ -74,10 +74,6 @@ func (t *provisioningRequestReconcilerTask) handleClusterPolicyConfiguration(ctx
 	if err != nil {
 		return false, err
 	}
-	err = t.finalizeProvisioningIfComplete(ctx, allPoliciesCompliant)
-	if err != nil {
-		return false, err
-	}
 
 	// If there are policies that are not Compliant and the configuration has not timed out,
 	// we need to requeue and see if the timeout is reached.
@@ -107,7 +103,7 @@ func (t *provisioningRequestReconcilerTask) updateConfigurationAppliedStatus(
 		utils.SetStatusCondition(&t.object.Status.Conditions,
 			provisioningv1alpha1.PRconditionTypes.ConfigurationApplied,
 			provisioningv1alpha1.CRconditionReasons.Missing,
-			metav1.ConditionFalse,
+			metav1.ConditionTrue,
 			"No configuration present",
 		)
 		return
@@ -178,8 +174,11 @@ func (t *provisioningRequestReconcilerTask) updateConfigurationAppliedStatus(
 
 		message = "The configuration is still being applied"
 		reason := provisioningv1alpha1.CRconditionReasons.InProgress
-		utils.SetProvisioningStateInProgress(t.object,
-			"Cluster configuration is being applied")
+		if !utils.IsClusterUpgradeInitiated(t.object) ||
+			utils.IsClusterUpgradeCompleted(t.object) {
+			utils.SetProvisioningStateInProgress(t.object,
+				"Cluster configuration is being applied")
+		}
 		if policyConfigTimedOut {
 			message += ", but it timed out"
 			reason = provisioningv1alpha1.CRconditionReasons.TimedOut
@@ -247,31 +246,6 @@ func (t *provisioningRequestReconcilerTask) updateOCloudNodeClusterId(ctx contex
 		}
 	}
 	return managedCluster, nil
-}
-
-// finalizeProvisioningIfComplete checks if the provisioning process is completed.
-// If so, it sets the provisioning state to "fulfilled" and updates the provisioned
-// resources in the status.
-func (t *provisioningRequestReconcilerTask) finalizeProvisioningIfComplete(ctx context.Context, allPoliciesCompliant bool) error {
-	if utils.IsClusterProvisionCompleted(t.object) && allPoliciesCompliant {
-		utils.SetProvisioningStateFulfilled(t.object)
-		mcl, err := t.updateOCloudNodeClusterId(ctx)
-		if err != nil {
-			return err
-		}
-
-		if err := utils.UpdateK8sCRStatus(ctx, t.client, t.object); err != nil {
-			return fmt.Errorf("failed to update status for ProvisioningRequest %s: %w", t.object.Name, err)
-		}
-
-		// Make sure extra labels are added to the needed CRs.
-		err = t.addPostProvisioningLabels(ctx, mcl)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // addPostProvisioningLabels adds multiple labels on the ManagedCluster and Agent objects that

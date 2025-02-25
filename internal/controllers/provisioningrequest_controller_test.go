@@ -2511,6 +2511,25 @@ var _ = Describe("ProvisioningRequestReconcile", func() {
 			Expect(c.Create(ctx, nodePool)).To(Succeed())
 			createNodeResources(ctx, c, nodePool.Name)
 
+			policy := &policiesv1.Policy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ztp-clustertemplate-a-v4-16.v1-subscriptions-policy",
+					Namespace: "cluster-1",
+					Labels: map[string]string{
+						utils.ChildPolicyRootPolicyLabel:       "ztp-clustertemplate-a-v4-16.v1-subscriptions-policy",
+						utils.ChildPolicyClusterNameLabel:      "cluster-1",
+						utils.ChildPolicyClusterNamespaceLabel: "cluster-1",
+					},
+				},
+				Spec: policiesv1.PolicySpec{
+					RemediationAction: "enforce",
+				},
+				Status: policiesv1.PolicyStatus{
+					ComplianceState: policiesv1.Compliant,
+				},
+			}
+			Expect(c.Create(ctx, policy)).To(Succeed())
+
 			provisionedCond := metav1.Condition{
 				Type:   string(provisioningv1alpha1.PRconditionTypes.ClusterProvisioned),
 				Status: metav1.ConditionTrue,

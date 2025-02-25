@@ -8,7 +8,6 @@ import (
 	ibgu "github.com/openshift-kni/cluster-group-upgrades-operator/pkg/api/imagebasedgroupupgrades/v1alpha1"
 	provisioningv1alpha1 "github.com/openshift-kni/oran-o2ims/api/provisioning/v1alpha1"
 	"github.com/openshift-kni/oran-o2ims/internal/controllers/utils"
-	siteconfig "github.com/stolostron/siteconfig/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,11 +54,10 @@ func (t *provisioningRequestReconcilerTask) IsUpgradeRequested(
 	return false, nil
 }
 
-func (t *provisioningRequestReconcilerTask) handleUpgrade(
-	ctx context.Context, renderedClusterInstance *siteconfig.ClusterInstance) (ctrl.Result, error) {
+func (t *provisioningRequestReconcilerTask) handleUpgrade(ctx context.Context, clusterName string) (ctrl.Result, error) {
 	t.logger.InfoContext(
 		ctx,
-		"Start handleUpgrade",
+		"Start handling upgrade",
 	)
 	clusterTemplate, err := t.object.GetClusterTemplateRef(ctx, t.client)
 	if err != nil {
@@ -67,12 +65,12 @@ func (t *provisioningRequestReconcilerTask) handleUpgrade(
 	}
 
 	ibgu := &ibgu.ImageBasedGroupUpgrade{}
-	err = t.client.Get(ctx, types.NamespacedName{Name: t.object.Name, Namespace: renderedClusterInstance.Namespace}, ibgu)
+	err = t.client.Get(ctx, types.NamespacedName{Name: t.object.Name, Namespace: clusterName}, ibgu)
 	if err != nil && errors.IsNotFound(err) {
 		ibgu, err = utils.GetIBGUFromUpgradeDefaultsConfigmap(
 			ctx, t.client, clusterTemplate.Spec.Templates.UpgradeDefaults,
 			clusterTemplate.Namespace, utils.UpgradeDefaultsConfigmapKey,
-			renderedClusterInstance.Spec.ClusterName, t.object.Name, renderedClusterInstance.Namespace)
+			clusterName, t.object.Name, clusterName)
 		if err != nil {
 			return requeueWithError(fmt.Errorf("failed to generate IBGU for cluster: %w", err))
 		}
@@ -132,7 +130,6 @@ func (t *provisioningRequestReconcilerTask) handleUpgrade(
 					message,
 				)
 			} else {
-				utils.SetProvisioningStateFulfilled(t.object)
 				utils.SetStatusCondition(&t.object.Status.Conditions,
 					provisioningv1alpha1.PRconditionTypes.UpgradeCompleted,
 					provisioningv1alpha1.CRconditionReasons.Completed,
