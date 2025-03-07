@@ -350,3 +350,27 @@ func matchesAnyPattern(path []string, patterns [][]string) bool {
 	}
 	return false
 }
+
+// HasFatalProvisioningFailure checks if the ProvisioningRequest
+// has a fatal provisioning failure that cannot be recovered
+// on its own.
+func HasFatalProvisioningFailure(conditions []metav1.Condition) bool {
+	var conditionTypes = []ConditionType{
+		PRconditionTypes.HardwareProvisioned,
+		PRconditionTypes.HardwareNodeConfigApplied,
+		PRconditionTypes.HardwareConfigured,
+		PRconditionTypes.ClusterInstanceProcessed,
+		PRconditionTypes.ClusterProvisioned,
+		PRconditionTypes.ConfigurationApplied,
+		PRconditionTypes.UpgradeCompleted,
+	}
+
+	for _, condType := range conditionTypes {
+		cond := meta.FindStatusCondition(conditions, string(condType))
+		if cond != nil && cond.Status == metav1.ConditionFalse &&
+			(cond.Reason == string(CRconditionReasons.Failed) || cond.Reason == string(CRconditionReasons.TimedOut)) {
+			return true
+		}
+	}
+	return false
+}
