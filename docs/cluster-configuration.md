@@ -512,13 +512,16 @@ metadata:
 
 We assume a ManagedCluster has been installed through a `ProvisioningRequest` referencing the [sno-ran-du.v4-Y-Z-4](samples/git-setup/clustertemplates/version_4.Y.Z/sno-ran-du/sno-ran-du-v4-Y-Z-4.yaml) `ClusterTemplate` CR.
 
-In this example we are updating the `hwProfile` under `spec.nodeGroupData.hwProfile` in the [placeholder-du-template-v1](samples/git-setup/clustertemplates/hardwaretemplates/sno-ran-du/placeholder-du-template-v1.yaml) hardware template resource.
+In this example we are updating BIOS settings, BIOS firmware, and BMC firmware by updating the `hwProfile` under `spec.nodeGroupData.hwProfile` in the [placeholder-du-template-v1](samples/git-setup/clustertemplates/hardwaretemplates/sno-ran-du/placeholder-du-template-v1.yaml) hardware template resource.
 
 The following steps are required:
 
 1. Upversion the [sno-ran-du.v4-Y-Z-4](samples/git-setup/clustertemplates/version_4.Y.Z/sno-ran-du/sno-ran-du-v4-Y-Z-4.yaml) ClusterTemplate:
-    * Create a new version of the [placeholder-du-template-v1](samples/git-setup/clustertemplates/hardwaretemplates/sno-ran-du/placeholder-du-template-v1.yaml) hardware template resource - [placeholder-du-template-v2](samples/git-setup/clustertemplates/hardwaretemplates/sno-ran-du/placeholder-du-template-v2.yaml)
-        * The content is updated to point to new `hwProfile(s)`. For our example we are updating `spec.nodeGroupData.hwProfile` from `profile-proliant-gen11-dual-processor-256G-v1` to `profile-proliant-gen11-dual-processor-256G-v2`.
+    * Create a new version of the [profile-dell-r740-v1](samples/git-setup/clustertemplates/hardwareprofiles/profile-dell-r740-v1.yaml) `HardwareProfile` - [profile-dell-r740-v2](samples/git-setup/clustertemplates/hardwareprofiles/profile-dell-r740-v2.yaml)
+        * Update the name from `profile-dell-r740-v1` to `profile-dell-r740-v2`.
+        * Update the `spec.bios`, `spec.biosFirmware` and `spec.bmcFirmware` with desired settings/versions.
+    * Create a new version of the [placeholder-du-template-v1](samples/git-setup/clustertemplates/hardwaretemplates/sno-ran-du/placeholder-du-template-v1.yaml) `HardwareTemplate` - [placeholder-du-template-v2](samples/git-setup/clustertemplates/hardwaretemplates/sno-ran-du/placeholder-du-template-v2.yaml)
+        * The content is updated to point to new `hwProfile(s)`. For our example we are updating `spec.nodeGroupData.hwProfile` from `profile-dell-r740-v1` to `profile-dell-r740-v2`.
     * Create a new version of the [sno-ran-du.v4-Y-Z-4](samples/git-setup/clustertemplates/version_4.Y.Z/sno-ran-du/sno-ran-du-v4-Y-Z-4.yaml) `ClusterTemplate` - [sno-ran-du.v4-Y-Z-5](samples/git-setup/clustertemplates/version_4.Y.Z/sno-ran-du/sno-ran-du-v4-Y-Z-5.yaml).
         * update the name from `sno-ran-du.v4-Y-Z-4` to `sno-ran-du.v4-Y-Z-5` (the namespace remains `sno-ran-du-v4-Y-Z`).
         * update `spec.version` from `v4-Y-Z-4` to `v4-Y-Z-5`.
@@ -527,13 +530,28 @@ The following steps are required:
     * The O-Cloud manager validates the new `ClusterTemplate`, but no other action is taken since the `ProvisioningRequest` has not been updated.
 3. The SMO selects the new `ClusterTemplate` version in the `ProvisioningRequest`.
     * `spec.templateVersion` is updated from `v4-Y-Z-4` to `v4-Y-Z-5`, the one pointing to the new `hwProfile`.
-4. The O-Cloud manager:
+4. The O-Cloud manager detects the change:
+    * Updates the hardware profile in the `nodeAllocationRequests` CR for that cluster to the new profile.
+
+    ```yaml
+    spec:
+      ...
+        nodeGroup:
+        - nodeGroupData:
+            hwProfile: profile-dell-r740-v2
+            name: controller
+            resourceSelector:
+              server-colour: blue
+              server-type: Dell-R740
+            role: master
+      ...
+    ```
     * Updates the status of the `ProvisioningRequest`:
 
     ```yaml
-        - lastTransitionTime: "2024-11-06T16:55:30Z"
+        - lastTransitionTime: "2025-10-01T21:36:01Z"
           message: Hardware configuring is in progress
-          reason: ConfigurationUpdateRequested
+          reason: InProgress
           status: "False"
           type: HardwareConfigured
         ...
@@ -543,57 +561,86 @@ The following steps are required:
           provisioningDetails: Hardware configuring is in progress
           provisioningState: progressing
     ```
+5. The O-Cloud Metal3 hardware plugin detects the updated `NodeAllocationRequest` CR:
+    * It lists the `AllocatedNode` CRs that reference the `NodeAllocationRequest` and updates `spec.hwProfile` in each `AllocatedNode` CR to the new profile.
+    * It computes BIOS/firmware changes from the new `HardwareProfile` and requests the updates by updating the Metal3 resources—`HostFirmwareSettings` and `HostFirmwareComponents`—with the changes.
+    * The `NodeAllocationRequest` and `AllocatedNode` CRs status conditions are also updated to reflect the configuration change.
 
-    * Updates the desired hardware profile in the `nodeAllocationRequests` CR for that cluster and the status condition to reflect the configuration change.
-
+    `NodeAllocationRequest` CR status:
     ```yaml
-    spec:
-      ...
-        - hwProfile: profile-proliant-gen11-dual-processor-256G-v2
-          interfaces:
-      ...
     status:
       conditions:
-      - lastTransitionTime: "2024-10-20T01:22:19Z"
+      - lastTransitionTime: "2025-09-17T21:47:53Z"
         message: Created
         reason: Completed
         status: "True"
         type: Provisioned
-      - lastTransitionTime: "2024-11-06T16:55:30Z"
-        message: Spec updated; awaiting configuration application by the hardware plugin
+      - lastTransitionTime: "2025-10-01T21:36:01Z"
+        message: 'AllocatedNode metal3-hwplugin-sno1-dell-r740-pool-dell-r740-sno1:
+          Update Requested'
         reason: ConfigurationUpdateRequested
         status: "False"
         type: Configured
     ```
 
-    * Obtains the list of nodes from the `NodeAllocationRequest` CR for the master MCP.
-    * For the SNO case that we are considering, there is only one node that cannot be cordoned and drained.
-    * Updates `spec.hwProfile` in the `Node` (`node.clcm.openshift.io/v1alpha1`) CR.
-5. The hardware plugin requests the hardware manager to apply the new hardware profile from the `Node` `spec`.
-6. The hardware manager updates the profile.
-7. The hardware plugin waits for the result from the hardware manager.
+    `AllocatedNode` CR status:
+    ```yaml
+    conditions:
+    - lastTransitionTime: "2025-09-17T21:47:53Z"
+      message: Provisioned
+      reason: Completed
+      status: "True"
+      type: Provisioned
+    - lastTransitionTime: "2025-10-01T21:36:01Z"
+      message: Update Requested
+      reason: ConfigurationUpdateRequested
+      status: "False"
+      type: Configured
+    ```
+6. Metal3 baremetal operator applies the updates on the host.
+7. The O-Cloud metal3 hardware plugin waits for the result via `HostFirmwareSettings`/`HostFirmwareComponents` status and validates configuration.
     * Success scenario:
-        * The hardware plugin updates the status of the `Node` CR.
+        * It updates the status of the `AllocatedNode` CR to reflect the result of the operation.
+        ```yaml
+        status:
+          conditions:
+          - lastTransitionTime: "2025-09-17T21:47:53Z"
+            message: Provisioned
+            reason: Completed
+            status: "True"
+            type: Provisioned
+          - lastTransitionTime: "2025-10-01T22:05:01Z"
+            message: Configuration has been applied successfully
+            reason: ConfigurationApplied
+            status: "True"
+            type: Configured
+          hwProfile: profile-dell-r740-v2
+        ```
+        * Once all nodes have been updated, it will update the status of the `NodeAllocationRequest` CR to reflect the result of the operation.
+        ```yaml
+        status:
+          conditions:
+          - lastTransitionTime: "2025-09-17T21:47:53Z"
+            message: Created
+            reason: Completed
+            status: "True"
+            type: Provisioned
+          - lastTransitionTime: "2025-10-01T22:05:01Z"
+            message: Configuration has been applied successfully
+            reason: ConfigurationApplied
+            status: "True"
+            type: Configured
+         ```
     * Failure scenario:
         * The operation is aborted.
-        * The status of the `Node` CR is updated with the failure reason.
-        * The O-Cloud manager does not initiate a rollback of any nodes already updates. This is left to the user to remediate.
-8. Once all nodes have been updated, the hardware plugin will update the status of the `NodePool` CR `Configured` condition to reflect the result of the operation:
-
-   ```yaml
-       - lastTransitionTime: "2024-10-20T01:22:19Z"
-         message: Configuration has been applied successfully
-         reason: ConfigApplied
-         status: "True"
-         type: Configured
-   ```
-
-9. The O-Cloud manager will update the `ProvisioningRequest` status to reflect the result of the operation, based on the status update of the `NodePool` CR:
+        * The status of the `AllocatedNode` CR is updated with the failure reason.
+        * The O-Cloud manager does not initiate a rollback of any nodes already updated. This is left to the user to remediate.
+8. The O-Cloud manager will update the `ProvisioningRequest` status to reflect the result of the operation, based on the status update of the `NodeAllocationRequest` CR:
 
 ```yaml
-    - lastTransitionTime: "2024-11-06T17:57:31Z"
+    - lastTransitionTime: "2025-10-01T22:05:01Z"
       message: Configuration has been applied successfully
-      reason: ConfigApplied
+      reason: Completed
       status: "True"
       type: HardwareConfigured
     ...

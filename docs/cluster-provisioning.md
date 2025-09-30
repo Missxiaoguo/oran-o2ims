@@ -12,7 +12,7 @@ The O-Cloud Manager Operator serves as an O-Cloud Manager, orchestrating the com
 
 The operator leverages several key components to achieve this:
 
-- [ORAN Hardware Manager Plugin](https://github.com/openshift-kni/oran-hwmgr-plugin/tree/main): Manages `NodeAllocationRequest` CR, interacting with the hardware manager to provision and allocate nodes for the cluster.
+- [Metal3 Baremetal operator](https://github.com/openshift-kni/oran-hwmgr-plugin/tree/main): Manages `NodeAllocationRequest` CR, interacting with the hardware manager to provision and allocate nodes for the cluster.
 - [SiteConfig Operator](https://github.com/stolostron/siteconfig): Manages the `ClusterInstance` CR, initiating the cluster installation process.
 - [ACM Policy Engine](https://github.com/open-cluster-management-io/governance-policy-propagator): Enforces configuration `Policies` to ensure the installed cluster is properly configured and compliant with operational requirements.
 
@@ -20,18 +20,7 @@ The operator leverages several key components to achieve this:
 
 ### Prerequisites on Hub Cluster
 
-Ensure the following operators are installed on the hub cluster:
-
-- Advanced Cluster Management (ACM) v2.14+
-- Red Hat OpenShift GitOps Operator
-- ORAN Hardware Manager Plugin
-- SiteConfig Operator
-
-  Enable it in ACM by running the following command:
-
-  ```console
-  oc patch multiclusterhubs.operator.open-cluster-management.io multiclusterhub -n <ACM_NAMESPACE> --type json --patch '[{"op": "add", "path":"/spec/overrides/components/-", "value": {"name":"siteconfig","enabled": true}}]'
-  ```
+Prerequisites have moved to the main README so we have a single source of truth. See [Hub Cluster Requirements](../README.md#hub-cluster-requirements).
 
 ### Git Respository Setup
 

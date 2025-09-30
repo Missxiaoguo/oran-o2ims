@@ -1,0 +1,17 @@
+apiVersion: clcm.openshift.io/v1alpha1 
+kind: HardwareProfile
+metadata:
+  name: profile-dell-r740-v1
+  namespace: oran-o2ims 
+spec:
+  bios:
+    attributes:
+      #BootMode: UEFI
+      MemTest: "Disabled"
+      AcPwrRcvryUserDelay: 60
+  biosFirmware:
+    version: 2.22.2
+    url: http://example.com:8888/firmware/r740/BIOS_F8GPH_WN64_2.22.2.EXE
+  bmcFirmware:
+    version: 7.00.00.173
+    url: http://example.com:8888/firmware/r740/iDRAC-with-Lifecycle-Controller_Firmware_XTFXJ_WN64_7.00.00.173_A00.EXE

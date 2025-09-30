@@ -13,6 +13,10 @@ SPDX-License-Identifier: Apache-2.0
 
 <!-- TOC -->
 - [O-RAN O-Cloud Manager](#o-ran-o-cloud-manager)
+  - [Prerequisites](./docs/prereqs.md)
+  - [GitOps repository layout and setup](./docs/gitops-layout-and-setup.md)
+  - [Template Overview](./docs/template-overview.md)
+  - [Provisioning API](./docs/cluster-provisioning.md)
   - [Operator Deployment](#operator-deployment)
     - [Deploy the operator on your cluster](#deploy-the-operator-on-your-cluster)
     - [Deploying operator from catalog](#deploying-operator-from-catalog)
@@ -430,43 +434,6 @@ configuration requirements.
          Type:                  SmoRegistrationCompleted
    ...
    ```
-
-### OAuth Expectations/Requirements
-
-To ensure interoperability between the SMO, the O-Cloud Manager, and the Authorization Server, these are the
-requirements
-regarding the OAuth settings and JWT contents.
-
-1. It is expected that the administrator of the Authentication Server has created clients for both the SMO and IMS
-   resource servers. For example purposes, this document assumes these to be "smo-client" and "o2ims-client".
-
-2. It is expected that the "smo-client" has been assigned "roles" which map to the Kubernetes RBAC roles
-   defined [here](config/rbac/oran_o2ims_oauth_role_bindings.yaml) according to the level of access required by the SMO.
-   The "roles" attribute is expected to contain a list of roles assigned to the client.
-   For example, one or more of "o2ims-reader", "o2ims-subscriber", "o2ims-maintainer", "o2ims-provisioner", or
-   "o2ims-admin".
-
-3. The "o2ims-client" is also expected to be assigned some form of authorization on the SMO. This depends largely on the
-   SMO implementation and is somewhat transparent to the O-Cloud Manager. If specific scopes are required for the
-   "o2ims-client" to access the SMO resource server, then the Inventory CR must be customized by setting the "scopes"
-   attribute.
-
-4. It is expected that the JWT token will contain the mandatory attributes defined in
-   [RFC9068](https://datatracker.ietf.org/doc/html/rfc9068) as well as the optional attributes related to "roles".
-
-5. The "aud" attribute is expected to contain a list of intended audiences and must at a minimum include the
-   "o2ims-client" identifier.
-
-6. It is expected that all attributes are top-level attributes (i.e., are not nested). For example,
-   `"realm_access.roles": ["a", "b", "c"]` is valid, but `"realm_access": {"roles": ["a", "b", "c"]}` is not. In some
-   cases, this may require special configuration steps on the Authorization Server to ensure the proper format in the
-   JWT tokens.
-
-7. Client certificate binding (i.e., RFC8705) is enabled by default. If the authorization server has inserted a claim
-   into the token which contains the SHA256 fingerprint of the client certificate which requested a token then it will
-   be validated. If the client certificate which is making the request doesn't match the client certificate that
-   requested the token then the request will be rejected. That claim is expected to be `"cnf": {"x5t#S256": "...."}`.
-   This is an exception to the rule described in (6) above. See below for an example.
 
 ### Sample OAuth JWT Token
 
