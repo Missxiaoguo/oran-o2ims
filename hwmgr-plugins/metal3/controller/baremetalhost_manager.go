@@ -460,6 +460,12 @@ func clearBMHNetworkData(
 	return ctrl.Result{}, nil
 }
 
+// processHwProfileWithHandledError processes the hardware profile requirements for a BareMetalHost
+// and updates the corresponding node's condition to reflect success or failure.
+// On error it sets the node condition to `Failed` or `InvalidInput` (for input errors) with the
+// error message. If processing succeeds and no update is required for a post-install run, it sets
+// the node condition to `ConfigApplied` / `ConfigSuccess`. Returns a boolean indicating whether a
+// hardware update is required and any error encountered.
 func processHwProfileWithHandledError(
 	ctx context.Context,
 	c client.Client,
@@ -501,7 +507,10 @@ func processHwProfileWithHandledError(
 // It annotates the BMH with BiosUpdateNeeded and/or FirmwareUpdateNeeded to signal pending updates.
 // For postInstall, it creates or updates a HostUpdatePolicy to control the update timing.
 //
-// Returns (true, nil) if any update is required, (false, nil) if no updates needed.
+// processHwProfile evaluates whether BIOS or firmware updates are required for the given BareMetalHost
+// according to the named HardwareProfile, clears existing update annotations, annotates the BMH to signal
+// required updates, and creates or updates a HostUpdatePolicy when postInstall is true.
+// It returns true if any update is required, false if no updates are needed, and an error on failure.
 func processHwProfile(ctx context.Context,
 	c client.Client,
 	logger *slog.Logger,
@@ -604,6 +613,8 @@ func annotateNodeConfigInProgress(ctx context.Context,
 	return nil
 }
 
+// handleTransitionNodes processes transition logic for each AllocatedNode in nodelist by delegating to handleTransitionNode.
+// It returns immediately if any invocation requests a requeue or returns an error, otherwise it completes after processing all nodes.
 func handleTransitionNodes(ctx context.Context,
 	c client.Client,
 	noncachedClient client.Reader,
@@ -625,7 +636,11 @@ func handleTransitionNodes(ctx context.Context,
 // It is responsible for:
 // - adding reboot annotation (postInstall only) once the corresponding CRs report valid changes
 // - waiting for BMH to enter expected transitional state (Preparing/Servicing)
-// - removing update-needed annotations and setting node config-in-progress annotation
+// handleTransitionNode processes update transitions for a single AllocatedNode and its associated BareMetalHost.
+// It fetches the BMH for the node, ensures annotations are present, optionally evaluates whether a reboot is required
+// for post-install flows, and checks BIOS and firmware update-needed annotations. For the first matching update case
+// found (BIOS or firmware) it delegates handling to processBMHUpdateCase and propagates any error or requeue directive.
+// Only one update case is processed per reconciliation cycle; if no update annotations are present the function returns nil.
 func handleTransitionNode(ctx context.Context,
 	c client.Client,
 	noncachedClient client.Reader,
@@ -675,6 +690,8 @@ func handleTransitionNode(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
+// addRebootAnnotation adds the reboot annotation to the given BareMetalHost to signal a required reboot.
+// It returns an error if the annotation cannot be applied.
 func addRebootAnnotation(ctx context.Context, c client.Client, logger *slog.Logger, bmh *metal3v1alpha1.BareMetalHost) error {
 	bmhName := types.NamespacedName{Name: bmh.Name, Namespace: bmh.Namespace}
 	if err := updateBMHMetaWithRetry(ctx, c, logger, bmhName, "annotation", BmhRebootAnnotation, "", OpAdd); err != nil {
@@ -685,7 +702,20 @@ func addRebootAnnotation(ctx context.Context, c client.Client, logger *slog.Logg
 
 // evaluateCRForReboot evaluates the BareMetalHost for pending BIOS and/or
 // firmware updates and adds the reboot annotation to the BMH to trigger node
-// reboot when required.
+// evaluateCRForReboot decides whether a BareMetalHost requires a reboot based on
+// BIOS and firmware update annotations and, when criteria are met, adds a reboot
+// annotation to the host.
+//
+// It examines the presence of BiosUpdateNeededAnnotation and
+// FirmwareUpdateNeededAnnotation on the provided BMH. If both annotations are
+// present, it requires both firmware-settings and host-firmware-components
+// validations to succeed before adding the reboot annotation. If only one of the
+// annotations is present, it performs the corresponding validation and adds the
+// reboot annotation when that validation indicates a change that requires a
+// reboot.
+//
+// Returns an error if any validation check fails or if adding the reboot
+// annotation encounters an error.
 func evaluateCRForReboot(ctx context.Context, c client.Client, logger *slog.Logger, bmh *metal3v1alpha1.BareMetalHost) error {
 	// Check if both annotations are present
 	hasBiosAnnotation := bmh.Annotations[BiosUpdateNeededAnnotation] != ""
@@ -745,7 +775,16 @@ func evaluateCRForReboot(ctx context.Context, c client.Client, logger *slog.Logg
 //     - Day1: waits for Preparing state
 //     - Day2(postInstall): waits for Servicing state
 //  3. When the BMH is in the expected state, removes the update-needed annotations from BMH and
-//     adds the config-in-progress annotation to the AllocatedNode to mark the update as in progress.
+// processBMHUpdateCase orchestrates the transition of a BareMetalHost update case
+// from "update-needed" to "config-in-progress" for a single AllocatedNode.
+//
+// It handles transient BMH error tolerance and may mark the node as failed when
+// the BMH is in a persistent error state. The function waits for the BMH to
+// reach the expected transition condition (Preparing for Day1 or Servicing for
+// post-install Day2), removes the update-needed annotation from the BMH, and
+// adds a config-in-progress annotation to the AllocatedNode when no other
+// configuration is already in progress. Returns a ctrl.Result that requests
+// requeueing when additional reconciliation steps are required.
 func processBMHUpdateCase(ctx context.Context,
 	c client.Client,
 	logger *slog.Logger,

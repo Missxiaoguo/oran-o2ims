@@ -220,7 +220,8 @@ func deriveNodeAllocationRequestStatusFromNodes(
 }
 
 // findNodeConfigInProgress scans the AllocatedNodeList to find the first AllocatedNode with config-in-progress
-// annotation
+// findNodeConfigInProgress locates the first AllocatedNode in the list that has a non-empty config-in-progress annotation.
+// It returns a pointer to that AllocatedNode, or nil if no node is annotated as in-progress.
 func findNodeConfigInProgress(nodelist *pluginsv1alpha1.AllocatedNodeList) *pluginsv1alpha1.AllocatedNode {
 	for _, node := range nodelist.Items {
 		if getConfigAnnotation(&node) != "" {
@@ -231,7 +232,10 @@ func findNodeConfigInProgress(nodelist *pluginsv1alpha1.AllocatedNodeList) *plug
 	return nil
 }
 
-// findNodeConfigRequested finds the first AllocatedNode that has a configuration update requested.
+// findNodeConfigRequested finds the first AllocatedNode that requests a configuration update.
+// A node requests an update if it either has no `Configured` condition and its Spec.HwProfile
+// differs from Status.HwProfile, or if the `Configured` condition is False with reason `ConfigUpdate`.
+// It returns a pointer to the matching AllocatedNode or nil if no such node is found.
 func findNodeConfigRequested(nodelist *pluginsv1alpha1.AllocatedNodeList) *pluginsv1alpha1.AllocatedNode {
 	for _, node := range nodelist.Items {
 		condition := meta.FindStatusCondition(node.Status.Conditions, string(hwmgmtv1alpha1.Configured))
@@ -244,7 +248,8 @@ func findNodeConfigRequested(nodelist *pluginsv1alpha1.AllocatedNodeList) *plugi
 	return nil
 }
 
-// getGroupsSortedByRole returns NodeGroups sorted master-first, preserving spec order within same role.
+// getGroupsSortedByRole produces a new slice of NodeGroup with master roles first while preserving the original order among groups that share the same role.
+// The original NodeGroup slice in the NodeAllocationRequest.Spec is not modified; a stable sort is used to maintain intra-role ordering.
 func getGroupsSortedByRole(nodeAllocationRequest *pluginsv1alpha1.NodeAllocationRequest) []pluginsv1alpha1.NodeGroup {
 	var groupPriority = func(role string) int {
 		switch strings.ToLower(role) {
@@ -262,7 +267,11 @@ func getGroupsSortedByRole(nodeAllocationRequest *pluginsv1alpha1.NodeAllocation
 	return groups
 }
 
-// createNode creates an AllocatedNode CR with specified attributes
+// createNode ensures an AllocatedNode resource exists for the given NodeAllocationRequest.
+// If an AllocatedNode with the given name already exists the function returns without error.
+// When creating a new AllocatedNode it sets the hardware plugin label, an owner reference to the
+// NodeAllocationRequest, and initializes the Spec fields (GroupName, HwProfile, HardwarePluginRef,
+// HwMgrNodeNs, HwMgrNodeId). Returns an error if the existence check or creation call fails.
 func createNode(ctx context.Context,
 	c client.Client,
 	logger *slog.Logger,
@@ -431,7 +440,10 @@ func processNewNodeAllocationRequest(ctx context.Context,
 	return nil
 }
 
-// isNodeAllocationRequestFullyAllocated checks to see if a NodeAllocationRequest CR has been fully allocated
+// isNodeAllocationRequestFullyAllocated reports whether every NodeGroup in the NodeAllocationRequest
+// has at least the configured Size of allocated nodes.
+// It counts allocated nodes for each group and returns true only if each group's allocated count
+// is greater than or equal to the group's Size.
 func isNodeAllocationRequestFullyAllocated(ctx context.Context,
 	noncachedClient client.Reader,
 	logger *slog.Logger,
@@ -450,7 +462,19 @@ func isNodeAllocationRequestFullyAllocated(ctx context.Context,
 // handleNodeInProgressUpdate progresses a node that is in in progress of being configured.
 // If its associated BMH status indicates that the update has completed, it updates the node
 // status, clears the config-in-progress annotation, applies the post-change updates, and returns
-// a no-requeue result to allow initiating the next node in the same reconciliation cycle.
+// handleNodeInProgressUpdate inspects the BareMetalHost for an AllocatedNode that is undergoing a hardware
+// profile update and finalizes the node or transitions it to a failed state based on the host's operational status.
+//
+// If the BMH is OperationalStatusOK, the function validates the node configuration (firmware and BIOS settings),
+// clears firmware spec fields and any transient BMH error annotation, updates the AllocatedNode status to indicate
+// the new hardware profile was applied successfully, and clears the config-in-progress annotation.
+//
+// If the BMH is OperationalStatusError, the function attempts transient-error handling and annotation; if the error
+// is not tolerated it clears the config-in-progress annotation, marks the AllocatedNode as failed with reason
+// BmhServicingErr, clears the BMH error annotation for future retries, and returns an error indicating the BMH is
+// in an error state.
+//
+// If the BMH is in any other state, the function requests a medium-interval requeue to continue monitoring progress.
 func handleNodeInProgressUpdate(ctx context.Context,
 	c client.Client,
 	noncachedClient client.Reader,
@@ -555,7 +579,11 @@ func handleNodeInProgressUpdate(ctx context.Context,
 	return hwmgrutils.RequeueWithMediumInterval(), nil
 }
 
-// initiateNodeUpdate starts the update process for the given AllocatedNode by processing the new hardware profile,
+// initiateNodeUpdate initiates a hardware profile update for the given AllocatedNode.
+// It processes the provided hardware profile, patches the AllocatedNode spec to the new profile, and transitions the node's Configured condition:
+// when an actual update is required the condition is set to False with reason ConfigUpdate and a medium-interval requeue is requested;
+// when no update is required the condition is set to True with reason ConfigApplied and status ConfigSuccess.
+// It returns a ctrl.Result that requests a medium-interval requeue when an update was initiated (no requeue otherwise), and an error if BMH retrieval, profile processing, or patching fails.
 func initiateNodeUpdate(ctx context.Context,
 	c client.Client,
 	noncachedClient client.Reader,
@@ -625,7 +653,14 @@ func initiateNodeUpdate(ctx context.Context,
 // may be stale since nodes are updated during processing, but the caller will refetch latest version
 // of each node.
 // TODO: Consider returning only a bool indicating if nodes exist for cleaner code,
-// since the caller needs to refetch nodes anyway.
+// handleNodeAllocationRequestConfiguring orchestrates Day-2 hardware profile updates for the AllocatedNodes of a NodeAllocationRequest.
+// 
+// It performs the following high-level steps in order:
+// 1. If a node is marked as config-in-progress, handle its completion.
+// 2. If a node has a config update requested but is not yet in progress, drive the transition (including any required reboot) to start configuration.
+// 3. If no active work exists, pick the next eligible node to update according to group role priority (masters first) and initiate its update.
+// 
+// The function returns a controller result that directs reconciliation requeue behavior, a snapshot of the current AllocatedNodeList, and any error encountered while initiating or progressing node configuration.
 func handleNodeAllocationRequestConfiguring(
 	ctx context.Context,
 	c client.Client,
