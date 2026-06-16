@@ -535,3 +535,86 @@ var _ = Describe("handleUpgrade", func() {
 		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 	})
 })
+
+var _ = Describe("handleClusterVersionUpgrade", func() {
+	var (
+		ctx         context.Context
+		task        *provisioningRequestReconcilerTask
+		c           client.Client
+		pr          *provisioningv1alpha1.ProvisioningRequest
+		clusterName string
+		ct          *provisioningv1alpha1.ClusterTemplate
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		clusterName = "test-cluster"
+
+		spokeclient.ClearCache()
+
+		ct = &provisioningv1alpha1.ClusterTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-template.v1.0.0", Namespace: "test-ns"},
+			Spec: provisioningv1alpha1.ClusterTemplateSpec{
+				Release: "4.22.0",
+			},
+		}
+		pr = &provisioningv1alpha1.ProvisioningRequest{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pr"},
+		}
+	})
+
+	setupClient := func(objs ...client.Object) {
+		allObjs := append([]client.Object{
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: clusterName}},
+			pr,
+		}, objs...)
+		c = fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(allObjs...).
+			WithStatusSubresource(pr).
+			Build()
+		task = &provisioningRequestReconcilerTask{
+			client: c,
+			object: pr,
+			logger: slog.New(slog.DiscardHandler),
+		}
+	}
+
+	It("should set PreconditionChecksFailed when managed-serviceaccount addon is missing", func() {
+		setupClient()
+
+		result, proceed, err := task.handleClusterVersionUpgrade(ctx, ct, clusterName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(proceed).To(BeFalse())
+		Expect(result.RequeueAfter).To(BeZero())
+
+		condition := meta.FindStatusCondition(task.object.Status.Conditions,
+			string(provisioningv1alpha1.PRconditionTypes.UpgradeCompleted))
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Reason).To(Equal(string(provisioningv1alpha1.CRconditionReasons.PreconditionChecksFailed)))
+		Expect(condition.Message).To(ContainSubstring("managed-serviceaccount addon is not available"))
+
+		Expect(task.object.Status.ProvisioningStatus.ProvisioningPhase).To(
+			Equal(provisioningv1alpha1.StateFailed))
+	})
+
+	It("should set Pending condition and requeue when token is not yet synced", func() {
+		setupClient(
+			&addonv1alpha1.ManagedClusterAddOn{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "managed-serviceaccount", Namespace: clusterName,
+				},
+			},
+		)
+
+		result, proceed, err := task.handleClusterVersionUpgrade(ctx, ct, clusterName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(proceed).To(BeFalse())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+		condition := meta.FindStatusCondition(task.object.Status.Conditions,
+			string(provisioningv1alpha1.PRconditionTypes.UpgradeCompleted))
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Reason).To(Equal(string(provisioningv1alpha1.CRconditionReasons.Pending)))
+		Expect(condition.Message).To(Equal("Preparing upgrade resources"))
+	})
+})
